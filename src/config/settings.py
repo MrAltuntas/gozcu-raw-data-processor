@@ -6,14 +6,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class DatabaseSettings(BaseSettings):
     """Database configuration settings"""
-    model_config = SettingsConfigDict(env_prefix='DATABASE')
+    model_config = SettingsConfigDict(env_prefix='DATABASE_')
 
-    host: str = Field('localhost', alias='HOST')
-    port: int = Field(5432, alias='PORT')
-    database: str = Field('gozcu', alias='NAME')
-    user: str = Field('postgres', alias='USER')
-    password: str = Field('postgres', alias='PASSWORD')
-    pool_size: int = Field(10, alias='POOL_SIZE')
+    host: str = Field(default='localhost')
+    port: int = Field(default=5432)
+    name: str = Field(default='camera_events')
+    user: str = Field(default='postgres')
+    password: str = Field(default='postgres')
+    pool_size: int = Field(default=10)
+
+    @property
+    def database(self) -> str:
+        """Alias for name field to maintain compatibility"""
+        return self.name
 
 
 class RedisSettings(BaseSettings):
