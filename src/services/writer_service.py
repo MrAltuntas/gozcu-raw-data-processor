@@ -5,8 +5,7 @@ import time
 from typing import Optional
 
 from src.config.settings import settings
-from src.repositories.detection_repository import detection_repository
-from src.repositories.event_repository import event_repository
+from src.repositories.camera_events_raw_repository import camera_events_raw_repository
 from src.services.batch_processor import batch_processor
 from src.services.redis_consumer import redis_consumer
 
@@ -20,18 +19,16 @@ class WriterService:
     Workflow:
     1. Read batch from Redis stream
     2. Process and validate batch
-    3. Bulk insert events to TimescaleDB
-    4. Bulk insert detections to TimescaleDB
-    5. Acknowledge messages in Redis
-    6. Log metrics and repeat
+    3. Bulk insert camera events with JSONB data to TimescaleDB
+    4. Acknowledge messages in Redis
+    5. Log metrics and repeat
     """
 
     def __init__(self):
         """Initialize WriterService with all required dependencies"""
         self._redis_consumer = redis_consumer
         self._batch_processor = batch_processor
-        self._event_repo = event_repository
-        self._detection_repo = detection_repository
+        self._camera_events_repo = camera_events_raw_repository
 
         self._running = False
         self._shutdown_event = asyncio.Event()
@@ -46,7 +43,7 @@ class WriterService:
         Process a single batch of messages from Redis.
 
         Returns:
-            dict: Metrics about the processing (events_count, detections_count, duration_ms)
+            dict: Metrics about the processing (events_count, messages_count, duration_ms)
 
         Raises:
             Exception: If processing fails after all retries
@@ -62,7 +59,6 @@ class WriterService:
         if not raw_messages:
             return {
                 "events_count": 0,
-                "detections_count": 0,
                 "messages_count": 0,
                 "duration_ms": 0
             }
@@ -71,27 +67,21 @@ class WriterService:
 
         try:
             # 2. Process batch (parse and validate)
-            events, detections = await self._batch_processor.process_batch(raw_messages)
+            events = await self._batch_processor.process_batch(raw_messages)
 
-            # 3. Bulk insert events
+            # 3. Bulk insert camera events with JSONB data
             events_inserted = 0
             if events:
-                events_inserted = await self._event_repo.bulk_insert(events)
+                events_inserted = await self._camera_events_repo.bulk_insert(events)
 
-            # 4. Bulk insert detections
-            detections_inserted = 0
-            if detections:
-                detections_inserted = await self._detection_repo.bulk_insert(detections)
-
-            # 5. Acknowledge messages in Redis
+            # 4. Acknowledge messages in Redis
             ack_count = await self._redis_consumer.acknowledge(message_ids)
 
             duration_ms = int((time.time() - start_time) * 1000)
 
-            # 6. Return metrics
+            # 5. Return metrics
             return {
                 "events_count": events_inserted,
-                "detections_count": detections_inserted,
                 "messages_count": len(raw_messages),
                 "ack_count": ack_count,
                 "duration_ms": duration_ms
@@ -123,8 +113,7 @@ class WriterService:
                     logger.info(
                         f"Batch processed successfully: "
                         f"{metrics['messages_count']} messages, "
-                        f"{metrics['events_count']} events, "
-                        f"{metrics['detections_count']} detections "
+                        f"{metrics['events_count']} events "
                         f"in {metrics['duration_ms']}ms"
                     )
 
@@ -182,7 +171,6 @@ class WriterService:
             # Statistics
             total_messages = 0
             total_events = 0
-            total_detections = 0
             batch_count = 0
 
             # Main processing loop
@@ -199,7 +187,6 @@ class WriterService:
                     if metrics:
                         total_messages += metrics.get("messages_count", 0)
                         total_events += metrics.get("events_count", 0)
-                        total_detections += metrics.get("detections_count", 0)
                         batch_count += 1
 
                         # Log aggregate statistics periodically
@@ -207,8 +194,7 @@ class WriterService:
                             logger.info(
                                 f"Aggregate stats: {batch_count} batches, "
                                 f"{total_messages} messages, "
-                                f"{total_events} events, "
-                                f"{total_detections} detections processed"
+                                f"{total_events} events processed"
                             )
 
                     # Small delay to prevent tight loop on empty batches
@@ -231,8 +217,7 @@ class WriterService:
                 f"WriterService stopped. Final stats: "
                 f"{batch_count} batches, "
                 f"{total_messages} messages, "
-                f"{total_events} events, "
-                f"{total_detections} detections"
+                f"{total_events} events"
             )
 
         except Exception as e:

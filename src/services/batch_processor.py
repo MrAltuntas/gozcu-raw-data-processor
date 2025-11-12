@@ -6,8 +6,7 @@ from typing import Optional
 
 from pydantic import ValidationError
 
-from src.models.camera_event import CameraEventRaw
-from src.models.detection import CameraDetectionRaw
+from database.models.camera_events_raw import CameraEventRaw
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +91,7 @@ class BatchProcessor:
 
     async def process_batch(
         self, raw_messages: list[dict]
-    ) -> tuple[list[CameraEventRaw], list[CameraDetectionRaw]]:
+    ) -> list[CameraEventRaw]:
         """
         Process a batch of raw messages from Redis stream
 
@@ -101,14 +100,13 @@ class BatchProcessor:
                          each message is dict with 'id', 'stream', and 'data' keys
 
         Returns:
-            tuple: (list of CameraEventRaw, list of CameraDetectionRaw)
+            list: list of CameraEventRaw with JSONB event data
 
         Note:
             Validation errors are logged but don't stop processing.
             Invalid messages are skipped and won't appear in results.
         """
         events: list[CameraEventRaw] = []
-        detections: list[CameraDetectionRaw] = []
 
         for message in raw_messages:
             message_id = message.get("id", "unknown")
@@ -118,77 +116,140 @@ class BatchProcessor:
                 logger.warning(f"Empty data in message {message_id}, skipping")
                 continue
 
-            # Process event data (always present)
             try:
-                event_data = {
-                    "camera_id": self._safe_int(data.get("camera_id")),
-                    "event_time": self._parse_datetime(data.get("event_time")),
-                    "frame_number": self._safe_int(data.get("frame_number")),
-                    "has_detection": self._safe_bool(data.get("has_detection", False)),
-                    "detection_count": self._safe_int(data.get("detection_count")) or 0,
-                    "processing_time_ms": self._safe_int(data.get("processing_time_ms")),
-                    "stream_lag_ms": self._safe_int(data.get("stream_lag_ms")),
-                }
+                # Extract and validate required fields first
+                camera_id = self._safe_int(data.get("cameraID") or data.get("camera_id"))
+                event_time = self._parse_datetime(data.get("eventDate") or data.get("event_time"))
+                
+                if not camera_id or not event_time:
+                    logger.warning(f"Missing required fields in message {message_id}: camera_id={camera_id}, event_time={event_time}")
+                    continue
 
-                # Validate and create event model
-                event = CameraEventRaw(**event_data)
+                # Build detected objects array for JSONB
+                detected_objects = []
+                
+                # Check if we have detection data
+                detections_data = data.get("detectedObjects")
+                logger.info(f"Message {message_id}: Raw detections_data = {detections_data} (type: {type(detections_data)})")
+                
+                # Parse JSON string if needed
+                if isinstance(detections_data, str):
+                    try:
+                        detections_data = json.loads(detections_data)
+                        logger.info(f"Message {message_id}: Parsed detections_data = {detections_data}")
+                    except json.JSONDecodeError:
+                        logger.warning(f"Failed to parse detectedObjects JSON in message {message_id}")
+                        detections_data = []
+                
+                if detections_data is not None and isinstance(detections_data, list):
+                    # Multiple detections format (new format)
+                    logger.info(f"Message {message_id}: Processing {len(detections_data)} detections")
+                    for i, detection in enumerate(detections_data):
+                        logger.info(f"Message {message_id}: Processing detection {i}: {detection}")
+                        detection_obj = self._build_detection_object(detection)
+                        logger.info(f"Message {message_id}: Built detection object {i}: {detection_obj}")
+                        if detection_obj:
+                            detected_objects.append(detection_obj)
+                else:
+                    # Single detection or legacy format
+                    if self._safe_bool(data.get("has_detection", False)):
+                        detection_obj = self._build_detection_object(data)
+                        if detection_obj:
+                            detected_objects.append(detection_obj)
+
+                # Create JSONB event data structure matching expected format
+                logger.info(f"Message {message_id}: Final detected_objects count: {len(detected_objects)}")
+                event_data_json = {
+                    "detectedObjects": detected_objects
+                }
+                
+                # Add optional metadata if present
+                optional_fields = {
+                    "frame_number": self._safe_int(data.get("frame_number")),
+                    "processing_time_ms": self._safe_int(data.get("processing_time_ms")),
+                    "stream_lag_ms": self._safe_int(data.get("stream_lag_ms"))
+                }
+                
+                # Add non-None optional fields
+                for field, value in optional_fields.items():
+                    if value is not None:
+                        event_data_json[field] = value
+
+                # Create SQLAlchemy model instance
+                event = CameraEventRaw(
+                    camera_id=camera_id,
+                    event_time=event_time,
+                    event_data=event_data_json
+                )
                 events.append(event)
 
-            except ValidationError as e:
-                logger.error(
-                    f"Validation error for event in message {message_id}: {e}",
-                    extra={"data": data, "errors": e.errors()},
-                )
-                continue
             except Exception as e:
                 logger.error(
-                    f"Unexpected error processing event in message {message_id}: {e}",
+                    f"Error processing message {message_id}: {e}",
                     extra={"data": data},
                 )
                 continue
 
-            # Process detection data (only if has_detection is True)
-            has_detection = self._safe_bool(data.get("has_detection", False))
-            if has_detection:
-                try:
-                    detection_data = {
-                        "event_time": self._parse_datetime(data.get("event_time")),
-                        "camera_id": self._safe_int(data.get("camera_id")),
-                        "class_id": self._safe_int(data.get("class_id")),
-                        "confidence": self._safe_int(data.get("confidence")),
-                        "photo_url": data.get("photo_url"),
-                        "coord_x": self._safe_int(data.get("coord_x")),
-                        "coord_y": self._safe_int(data.get("coord_y")),
-                        "region_ids": self._parse_region_ids(data.get("region_ids")),
-                        "bbox_width": self._safe_int(data.get("bbox_width")),
-                        "bbox_height": self._safe_int(data.get("bbox_height")),
-                        "object_id": data.get("object_id"),
-                        "track_id": self._safe_int(data.get("track_id")),
-                    }
-
-                    # Validate and create detection model
-                    detection = CameraDetectionRaw(**detection_data)
-                    detections.append(detection)
-
-                except ValidationError as e:
-                    logger.error(
-                        f"Validation error for detection in message {message_id}: {e}",
-                        extra={"data": data, "errors": e.errors()},
-                    )
-                    # Continue processing other messages
-                except Exception as e:
-                    logger.error(
-                        f"Unexpected error processing detection in message {message_id}: {e}",
-                        extra={"data": data},
-                    )
-                    # Continue processing other messages
-
         logger.info(
             f"Processed {len(raw_messages)} messages: "
-            f"{len(events)} events, {len(detections)} detections"
+            f"{len(events)} events with JSONB data"
         )
 
-        return events, detections
+        return events
+
+    def _build_detection_object(self, data: dict) -> Optional[dict]:
+        """
+        Build a detection object from raw data that matches Pydantic model structure
+        
+        Args:
+            data: Raw detection data dictionary
+            
+        Returns:
+            dict: Detection object matching expected format or None if invalid
+        """
+        try:
+            detection_obj = {}
+            
+            # Map fields according to Pydantic model (CameraEventCreate.DetectedObject)
+            field_mappings = {
+                "className": ["className", "class_name", "class_id"],
+                "confidence": ["confidence"],
+                "photoUrl": ["photoUrl", "photo_url"],
+                "coordinateX": ["coordinateX", "coordinate_x", "coord_x"],
+                "coordinateY": ["coordinateY", "coordinate_y", "coord_y"],
+                "regionID": ["regionID", "region_id", "region_ids"]
+            }
+            
+            for target_field, source_fields in field_mappings.items():
+                for source_field in source_fields:
+                    if source_field in data and data[source_field] is not None:
+                        if target_field == "className":
+                            detection_obj[target_field] = self._safe_int(data[source_field])
+                        elif target_field == "confidence":
+                            confidence = self._safe_int(data[source_field])
+                            if confidence is not None and 0 <= confidence <= 100:
+                                detection_obj[target_field] = confidence
+                        elif target_field in ["coordinateX", "coordinateY"]:
+                            detection_obj[target_field] = self._safe_int(data[source_field])
+                        elif target_field == "photoUrl":
+                            detection_obj[target_field] = str(data[source_field])
+                        elif target_field == "regionID":
+                            region_ids = self._parse_region_ids(data[source_field])
+                            if region_ids is not None:
+                                detection_obj[target_field] = region_ids
+                        break
+            
+            # Validate minimum required fields are present (matching Pydantic model requirements)
+            required_fields = ["className", "confidence", "photoUrl", "coordinateX", "coordinateY"]
+            if all(field in detection_obj for field in required_fields):
+                return detection_obj
+            else:
+                logger.debug(f"Detection missing required fields {required_fields}. Has: {list(detection_obj.keys())}")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"Error building detection object: {e}")
+            return None
 
 
 # Singleton instance

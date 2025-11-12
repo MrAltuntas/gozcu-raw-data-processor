@@ -1,18 +1,19 @@
-"""Event repository for camera events raw data."""
+"""Camera events raw repository for JSONB data."""
 
+import json
 import logging
 from typing import List
 
 from asyncpg.exceptions import PostgresError
 
 from src.core.database import db_manager
-from src.models.camera_event import CameraEventRaw
+from database.models.camera_events_raw import CameraEventRaw
 
 logger = logging.getLogger(__name__)
 
 
-class EventRepository:
-    """Repository for managing camera events raw data in TimescaleDB."""
+class CameraEventsRawRepository:
+    """Repository for managing camera events raw JSONB data in TimescaleDB."""
 
     async def bulk_insert(self, events: List[CameraEventRaw]) -> int:
         """
@@ -38,33 +39,32 @@ class EventRepository:
             async with db_manager.get_connection() as conn:
                 # Prepare data for COPY command
                 # COPY expects tuples in the same order as table columns
+                # Convert event_data dict to JSON string for JSONB column
                 records = [
                     (
                         event.camera_id,
                         event.event_time,
-                        event.frame_number,
-                        event.has_detection,
-                        event.detection_count,
-                        event.processing_time_ms,
-                        event.stream_lag_ms,
+                        json.dumps(event.event_data) if isinstance(event.event_data, dict) else event.event_data,
                     )
                     for event in events
                 ]
 
                 # Use COPY command for bulk insert - much faster than executemany
-                inserted_count = await conn.copy_records_to_table(
+                copy_result = await conn.copy_records_to_table(
                     table_name="camera_events_raw",
                     records=records,
                     columns=[
                         "camera_id",
                         "event_time",
-                        "frame_number",
-                        "has_detection",
-                        "detection_count",
-                        "processing_time_ms",
-                        "stream_lag_ms",
+                        "event_data",
                     ],
                 )
+
+                # Extract numeric count from COPY command result (e.g., "COPY 123" -> 123)
+                if isinstance(copy_result, str) and copy_result.startswith("COPY "):
+                    inserted_count = int(copy_result.split()[1])
+                else:
+                    inserted_count = int(copy_result)
 
                 logger.info(f"Successfully inserted {inserted_count} camera events")
                 return inserted_count
@@ -81,4 +81,4 @@ class EventRepository:
 
 
 # Singleton instance
-event_repository = EventRepository()
+camera_events_raw_repository = CameraEventsRawRepository()

@@ -13,7 +13,7 @@ class DatabaseSettings(BaseSettings):
     name: str = Field(default='camera_events')
     user: str = Field(default='postgres')
     password: str = Field(default='postgres')
-    pool_size: int = Field(default=10)
+    pool_size: int = Field(default=25)
 
     @property
     def database(self) -> str:
@@ -36,8 +36,8 @@ class ProcessingSettings(BaseSettings):
     """Processing configuration settings"""
     model_config = SettingsConfigDict(env_prefix='PROCESSING_')
 
-    batch_size: int = Field(default=100, description='Batch size for processing')
-    batch_timeout_seconds: float = Field(default=5.0, description='Batch timeout in seconds')
+    batch_size: int = Field(default=500, description='Batch size for processing')
+    batch_timeout_seconds: float = Field(default=2.0, description='Batch timeout in seconds')
     max_retries: int = Field(default=3, description='Maximum retry attempts')
 
 
